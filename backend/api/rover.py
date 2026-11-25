@@ -1,0 +1,131 @@
+"""Proxy to the rover server on the Pi, so the dashboard only ever talks to this API
+(one origin, one login) and the Pi is never exposed to the internet directly."""
+
+import json
+import logging
+import os
+import subprocess
+import time
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+
+from backend.api.auth import require_user
+from backend.config import ROOT, settings
+
+log = logging.getLogger("api.rover")
+
+router = APIRouter(prefix="/api/rover", tags=["rover"], dependencies=[Depends(require_user)])
+TIMEOUT = httpx.Timeout(3.0, read=5.0)
+
+
+def _headers() -> dict:
+    return {"X-Rover-Token": settings.rover_token} if settings.rover_token else {}
+
+
+def _url(path: str) -> str:
+    if not settings.rover_url:
+        raise HTTPException(503, "ROVER_URL not configured")
+    return settings.rover_url.rstrip("/") + path
+
+
+_client: httpx.AsyncClient | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    """One client for all commands keeps the connection to the Pi open. A new client per
+    request cost ~250 ms (SSL context + TCP setup), which made driving feel laggy."""
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=TIMEOUT, limits=httpx.Limits(keepalive_expiry=30))
+    return _client
+
+
+async def _forward(method: str, path: str, json=None):
+    try:
+        r = await _shared_client().request(method, _url(path), json=json, headers=_headers())
+    except httpx.HTTPError as e:
+        raise HTTPException(503, f"rover unreachable: {type(e).__name__}") from e
+    if r.status_code == 401:
+        # the rover rejected our ROVER_TOKEN; don't pass 401 on, or the dashboard logs the user out
+        raise HTTPException(502, "rover rejected ROVER_TOKEN (check .env on laptop and Pi)")
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, r.text[:300])
+    return r.json()
+
+
+@router.get("/status")
+async def status():
+    return await _forward("GET", "/status")
+
+
+@router.post("/control")
+async def control(request: Request):
+    return await _forward("POST", "/control", await request.json())
+
+
+@router.post("/mode")
+async def mode(request: Request):
+    return await _forward("POST", "/mode", await request.json())
+
+
+@router.post("/shutdown")
+async def shutdown() -> dict:
+    """Dashboard "Stop rover & dashboard": power the rover off cleanly, then stop the dashboard
+    (API + workers) on this laptop. infra/pi_watch.py keeps running and starts everything again
+    when the rover is switched back on (its beacon arrives from a new boot)."""
+    try:
+        await _forward("POST", "/power-off")
+        rover = "powering off"
+    except HTTPException as e:
+        rover = f"not reached ({e.detail})"
+    try:
+        boot = json.loads((ROOT / "logs" / "pi_state.json").read_text(encoding="utf-8")).get("pi", {}).get("boot")
+    except (OSError, ValueError):
+        boot = None
+    (ROOT / "logs").mkdir(exist_ok=True)
+    (ROOT / "logs" / "dashboard_sleep.json").write_text(
+        json.dumps({"since": time.time(), "rover_boot": boot, "rover": rover}), encoding="utf-8"
+    )
+    log.warning("shutdown from the dashboard: rover %s; dashboard stops in 3 s", rover)
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "infra" / "sleep_dashboard.ps1"),
+                "-DelaySeconds",
+                "3",
+            ],
+            cwd=ROOT,
+            creationflags=flags,
+        )
+    return {"rover": rover, "dashboard": "stopping in 3 s", "wakes_on_rover_boot": bool(boot)}
+
+
+@router.get("/stream.mjpg")
+async def stream():
+    client = httpx.AsyncClient(timeout=httpx.Timeout(3.0, read=None))
+    try:
+        req = client.build_request("GET", _url("/stream.mjpg"), headers=_headers())
+        resp = await client.send(req, stream=True)
+    except httpx.HTTPError as e:
+        await client.aclose()
+        raise HTTPException(503, f"rover unreachable: {type(e).__name__}") from e
+
+    async def body():
+        try:
+            async for chunk in resp.aiter_raw():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(body(), media_type=resp.headers.get("content-type", "multipart/x-mixed-replace"))

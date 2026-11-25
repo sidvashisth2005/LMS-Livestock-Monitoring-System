@@ -1,0 +1,8 @@
+# Rover (Pi). OpenCV, numpy and picamera2 come from apt (python3-opencv, python3-picamera2);
+# brickpi3 from the DexterInd repo; the Pixy2 SWIG module is built on the Pi (see docs/pixy2.md).
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+paho-mqtt>=2.0
+# NCNN detector backend (--detector ncnn:...), usually faster than ONNX on the Pi 4
+ncnn>=1.0.20240410

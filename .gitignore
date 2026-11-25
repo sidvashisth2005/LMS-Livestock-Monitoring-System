@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+dist/
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# ML artifacts and data (large; regenerate or download)
+ml/**/datasets/
+ml/**/runs/
+*.pt
+*.onnx
+*_ncnn_model/
+# ...except the deployed cow detector, so the Pi gets it with git pull
+!ml/detection/models/cow.onnx
+!ml/detection/models/coco_yolo11n.onnx
+!ml/detection/models/cow_ncnn_model/
+!ml/detection/models/coco_yolo11n_ncnn_model/
+!ml/detection/models/coco_yolo11n_416.onnx
+!ml/detection/models/coco_yolo11n_416_ncnn_model/
+ml/detection/models/cow_ncnn_model/__pycache__/
+ml/**/artifacts/*.joblib
+
+# Simulator / runtime output
+simulator/out/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# runtime logs from infra/run_all.ps1
+logs/
+# local firmware secrets
+firmware/**/include/lms_config.h
+# PlatformIO build output and downloaded libraries
+.pio/
+ml/detection/models/cow_ncnn_model/model_ncnn.py
+
+# large media kept beside the repo, not in git
+*.pptx
+*.mp4
